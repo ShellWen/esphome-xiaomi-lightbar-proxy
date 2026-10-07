@@ -6,7 +6,10 @@
 
 #include "esphome/core/component.h"
 #include "esphome/core/optional.h"
-#include "esphome/components/nrf24/nrf24.h"
+#include "esphome/core/gpio.h"
+#include "esphome/core/helpers.h"
+#include "esphome/components/spi/spi.h"
+#include "nRF24L01.h"
 
 namespace esphome {
 namespace xiaomi_lightbar {
@@ -55,21 +58,21 @@ class XiaomiLightbarLightBase {
   uint32_t light_serial_{0};
 };
 
-class XiaomiLightbarHub : public Component {
+class XiaomiLightbarHub : public Component,
+                         public spi::SPIDevice<spi::BIT_ORDER_MSB_FIRST, spi::CLOCK_POLARITY_LOW,
+                                               spi::CLOCK_PHASE_LEADING, spi::DATA_RATE_1MHZ> {
  public:
   void setup() override;
   void loop() override;
   void dump_config() override;
-  // Run after the nrf24 component has been set up.
-  float get_setup_priority() const override { return setup_priority::DATA - 1.0f; }
+  float get_setup_priority() const override { return setup_priority::DATA; }
 
-  void set_nrf24(nrf24::NRF24Component *nrf24) { this->nrf24_ = nrf24; }
+  void set_ce_pin(GPIOPin *pin) { this->ce_pin_ = pin; }
+  void set_pa_level(nRF24L01::rf24_pa_dbm_e level) { this->pa_level_ = level; }
   void set_channel(uint8_t channel) { this->channel_ = channel; }
   void set_tx_repeats(uint8_t repeats) { this->tx_repeats_ = repeats; }
   void set_tx_interval(uint32_t interval_ms) { this->tx_interval_ = interval_ms; }
 
-  // Build a 17-byte frame for (serial, command, options) and enqueue it for a
-  // non-blocking burst transmission from loop().
   void send_command(uint32_t serial, uint8_t command, uint8_t options = 0x00);
 
   void register_remote(XiaomiLightbarRemoteBase *remote) { this->remotes_.push_back(remote); }
@@ -86,26 +89,29 @@ class XiaomiLightbarHub : public Component {
     uint8_t last_seq{0};
   };
 
-  // Re-apply the parts of the radio configuration that the lightbar protocol
-  // needs but that the nrf24 component does not own / does not restore after a
-  // reset (CRC off, auto-ack off, payload size, addresses, pipes).
-  void assert_radio_profile_();
+  uint8_t read_register_(uint8_t reg);
+  void write_register_(uint8_t reg, uint8_t value);
+  void write_register_(uint8_t reg, const uint8_t *data, uint8_t len);
+  void radio_command_(uint8_t command);
+  bool configure_radio_();
   bool radio_profile_ok_();
+  bool read_packet_(uint8_t *packet);
+  bool transmit_(const uint8_t *packet);
   uint8_t next_sequence_(uint32_t serial);
   void on_radio_data_(const uint8_t *raw, uint8_t len);
   void handle_packet_(const uint8_t *data);
 
-  nrf24::NRF24Component *nrf24_{nullptr};
+  GPIOPin *ce_pin_{nullptr};
+  nRF24L01::rf24_pa_dbm_e pa_level_{nRF24L01::RF24_PA_LOW};
+  HighFrequencyLoopRequester high_frequency_loop_;
   uint8_t channel_{68};
   uint8_t tx_repeats_{20};
   uint32_t tx_interval_{10};
 
-  // Non-blocking TX queue drained one frame per interval from loop().
   std::vector<TxJob> tx_queue_;
-  bool tx_active_{false};
   uint32_t last_tx_ms_{0};
 
-  bool started_{false};
+  bool radio_ready_{false};
   uint32_t last_profile_check_ms_{0};
 
   std::map<uint32_t, uint8_t> tx_sequence_;

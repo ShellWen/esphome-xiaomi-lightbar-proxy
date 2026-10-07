@@ -13,64 +13,47 @@ static const char *const TAG = "xiaomi_lightbar";
 
 // Protocol constants (verified against lightbar2mqtt radio.cpp / radio.h).
 static const uint8_t PREAMBLE[8] = {0x53, 0x39, 0x14, 0xDD, 0x1C, 0x49, 0x34, 0x12};
-static const uint8_t SEND_ADDRESS[5] = {0x55, 0x55, 0x55, 0x55, 0x55};
-static const uint64_t RECEIVE_ADDRESS = 0xAAAAAAAAAAULL;
 
 void XiaomiLightbarHub::setup() {
-  if (this->nrf24_ == nullptr) {
-    ESP_LOGE(TAG, "nRF24 radio not configured");
-    this->mark_failed();
-    return;
-  }
-  // RX is delivered through the nrf24 component's data callback.
-  this->nrf24_->add_on_data_callback(
-      [this](const uint8_t *data, uint8_t len) { this->on_radio_data_(data, len); });
+  this->ce_pin_->setup();
+  this->ce_pin_->digital_write(false);
+  this->spi_setup();
+  delay(10);
+  this->radio_ready_ = this->configure_radio_();
+  this->last_profile_check_ms_ = millis();
+  if (this->radio_ready_)
+    this->high_frequency_loop_.start();
+  else
+    ESP_LOGE(TAG, "nRF24 radio not responding; retrying in loop");
 }
 
 void XiaomiLightbarHub::loop() {
-  if (this->nrf24_ == nullptr)
-    return;
-
   const uint32_t now = millis();
-
-  // Assert the lightbar radio profile once the radio is up, and keep re-asserting
-  // it if the chip is reset (the nrf24 watchdog only restores channel/data-rate/PA).
-  if (!this->started_) {
-    if (this->nrf24_->is_chip_connected()) {
-      this->started_ = true;
-      this->last_profile_check_ms_ = now;
-      this->assert_radio_profile_();
-    }
-  } else if (now - this->last_profile_check_ms_ > 1000) {
+  if (now - this->last_profile_check_ms_ >= 1000) {
     this->last_profile_check_ms_ = now;
-    if (!this->radio_profile_ok_()) {
-      ESP_LOGW(TAG, "Radio lost the lightbar profile; re-asserting");
-      this->assert_radio_profile_();
+    if (!this->radio_ready_ || !this->radio_profile_ok_()) {
+      ESP_LOGW(TAG, "Restoring lightbar radio profile");
+      this->radio_ready_ = this->configure_radio_();
     }
   }
+  if (!this->radio_ready_) {
+    this->high_frequency_loop_.stop();
+    return;
+  }
+  this->high_frequency_loop_.start();
 
-  // Drain the TX queue: one frame per tx_interval_, never blocking the loop.
-  if (!this->tx_queue_.empty()) {
-    if (!this->tx_active_) {
-      // Start of a burst: switch to TX mode once (opens the writing pipe).
-      this->nrf24_->stop_listening(SEND_ADDRESS);
-      this->tx_active_ = true;
-      this->last_tx_ms_ = now - this->tx_interval_;  // allow an immediate first write
-    }
-    if (now - this->last_tx_ms_ >= this->tx_interval_) {
-      TxJob &job = this->tx_queue_.front();
-      this->nrf24_->write(job.frame, sizeof(job.frame), true);  // NO_ACK multicast
-      this->last_tx_ms_ = now;
-      if (job.repeats_left > 0)
-        job.repeats_left--;
-      if (job.repeats_left == 0)
-        this->tx_queue_.erase(this->tx_queue_.begin());
-    }
-  } else if (this->tx_active_) {
-    // Burst finished: restore the reading pipe and go back to listening.
-    this->nrf24_->open_reading_pipe(0, RECEIVE_ADDRESS);
-    this->nrf24_->start_listening();
-    this->tx_active_ = false;
+  uint8_t packet[17];
+  for (uint8_t packets = 0; packets < 3 && this->read_packet_(packet); ++packets)
+    this->on_radio_data_(packet, sizeof(packet));
+
+  const uint32_t tx_now = millis();
+  if (!this->tx_queue_.empty() && tx_now - this->last_tx_ms_ >= this->tx_interval_) {
+    TxJob &job = this->tx_queue_.front();
+    if (!this->transmit_(job.frame))
+      ESP_LOGW(TAG, "Radio transmission failed");
+    this->last_tx_ms_ = tx_now;
+    if (--job.repeats_left == 0)
+      this->tx_queue_.erase(this->tx_queue_.begin());
   }
 }
 
@@ -81,35 +64,13 @@ void XiaomiLightbarHub::dump_config() {
   ESP_LOGCONFIG(TAG, "  TX interval: %u ms", this->tx_interval_);
   ESP_LOGCONFIG(TAG, "  Lights: %u, Remotes: %u", (unsigned) this->lights_.size(),
                 (unsigned) this->remotes_.size());
-  if (this->nrf24_ == nullptr)
-    ESP_LOGE(TAG, "  nRF24 radio not set!");
+  ESP_LOGCONFIG(TAG, "  PA level: %u", static_cast<unsigned>(this->pa_level_));
+  ESP_LOGCONFIG(TAG, "  Radio ready: %s", this->radio_ready_ ? "yes" : "no");
+  LOG_PIN("  CE pin: ", this->ce_pin_);
+  LOG_SPI_DEVICE(this);
 }
 
-void XiaomiLightbarHub::assert_radio_profile_() {
-  if (this->nrf24_ == nullptr)
-    return;
-  this->nrf24_->set_channel(this->channel_);
-  this->nrf24_->set_rf_data_rate(nRF24L01::RF24_2MBPS);
-  this->nrf24_->disable_crc();
-  this->nrf24_->set_auto_ack(false);
-  this->nrf24_->disable_dynamic_payloads();
-  this->nrf24_->set_payload_size(17);
-  this->nrf24_->set_address_width(5);
-  this->nrf24_->set_retries(15, 15);
-  this->nrf24_->open_writing_pipe(SEND_ADDRESS);
-  this->nrf24_->open_reading_pipe(0, RECEIVE_ADDRESS);
-  this->nrf24_->start_listening();
-  this->tx_active_ = false;
-  ESP_LOGD(TAG, "Asserted lightbar radio profile (channel %u, 2MBPS, CRC off, no auto-ack)",
-           this->channel_);
-}
 
-bool XiaomiLightbarHub::radio_profile_ok_() {
-  if (this->nrf24_ == nullptr || !this->nrf24_->is_chip_connected())
-    return false;
-  // A power-on reset re-enables CRC; use it as a cheap "was the chip reset?" probe.
-  return this->nrf24_->get_crc_length() == nRF24L01::RF24_CRC_DISABLED;
-}
 
 uint8_t XiaomiLightbarHub::next_sequence_(uint32_t serial) {
   uint8_t &seq = this->tx_sequence_[serial];  // value-initialized to 0 on first use
@@ -131,6 +92,8 @@ void XiaomiLightbarHub::send_command(uint32_t serial, uint8_t command, uint8_t o
   job.frame[15] = (crc >> 8) & 0xFF;
   job.frame[16] = crc & 0xFF;
   job.repeats_left = this->tx_repeats_;
+  if (this->tx_queue_.empty())
+    this->last_tx_ms_ = millis() - this->tx_interval_;
   this->tx_queue_.push_back(job);
   ESP_LOGD(TAG, "Queued command 0x%02X (options 0x%02X) for serial 0x%06X", command, options,
            serial);

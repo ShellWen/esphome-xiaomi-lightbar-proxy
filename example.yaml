@@ -9,54 +9,47 @@ esphome:
   name: xiaomi-lightbar
 
 esp32:
-  board: esp32dev
+  variant: esp32c3
+  flash_size: 4MB
   framework:
     type: esp-idf
 
 logger:
   level: DEBUG
+  hardware_uart: USB_SERIAL_JTAG
 
 api:
+  reboot_timeout: 0s
 
 ota:
   - platform: esphome
 
 wifi:
-  ssid: "MyNetwork"
-  password: "MyPassword"
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  reboot_timeout: 0s
 
-# Pull in both external components: the unmodified nrf24 driver and this one.
 external_components:
   - source:
       type: git
-      url: https://github.com/loucks1/nrf24_espidf
-    components: [nrf24]
-  - source:
-      type: git
-      url: https://github.com/zweckj/esphome-xiaomi-lightbar
+      url: https://github.com/ShellWen/esphome-xiaomi-lightbar-proxy
+      ref: main
     components: [xiaomi_lightbar]
 
 spi:
-  clk_pin: GPIO18
-  mosi_pin: GPIO23
-  miso_pin: GPIO19
-
-# The lightbar hub asserts CRC-off/auto-ack-off/payload-17/addresses itself, but the
-# nrf24 watchdog only restores channel/data-rate/PA, so set those here to match.
-nrf24:
-  id: radio
-  cs_pin: GPIO5
-  ce_pin: GPIO17
-  channel: 68
-  rf_data_rate: 2MBPS
-  pa_level: MAX
+  clk_pin: GPIO6
+  mosi_pin: GPIO7
+  miso_pin: GPIO5
 
 xiaomi_lightbar:
   id: lightbar_hub
-  nrf24_id: radio
-  # channel: 68        # optional, default 68
-  # tx_repeats: 20     # optional, default 20
-  # tx_interval: 10ms  # optional, default 10ms
+  cs_pin: GPIO10
+  ce_pin: GPIO4
+  data_rate: 1MHz
+  pa_level: LOW
+  channel: 68
+  tx_repeats: 20
+  tx_interval: 10ms
 
 light:
   - platform: xiaomi_lightbar
@@ -69,10 +62,7 @@ event:
     name: "Light Bar Remote"
     xiaomi_lightbar_id: lightbar_hub
     serial: 0x123456
-    # Optional local relay: pair the bar to this serial instead of the remote.
-    # Keep it equal to the light/pair serial above/below, not the remote serial.
-    # forward_to: 0xABCDEF
-    # Relays hold/RESET too; does not update the light's optimistic state.
+    forward_to: 0xABCDEF
     device_class: button
     on_press:
       then:

@@ -1,250 +1,179 @@
-# esphome-xiaomi-lightbar
+# ESPHome Xiaomi Lightbar Proxy
 
-A native [ESPHome](https://esphome.io) external component to control a **Xiaomi Mi
-Computer Monitor Light Bar (MJGJD01YL)** over an nRF24L01 radio, and to receive its
-remote's rotary/press actions.
+One ESPHome external component for an ESP32-C3 and nRF24L01+ to control the
+**Xiaomi Mi Computer Monitor Light Bar MJGJD01YL** and locally forward its stock
+remote. **MJGJD02YL is not supported.**
 
-This is a port of [`ebinf/lightbar2mqtt`](https://github.com/ebinf/lightbar2mqtt)
-(MIT) to ESPHome. Instead of hand-rolled WiFi + MQTT + Home Assistant discovery, it
-uses ESPHome's native API, so WiFi, OTA, logging, and Home Assistant entities are all
-handled for you. The light bar becomes a `light` entity, the remote an `event` entity.
+The radio driver is built into `xiaomi_lightbar`. There is no separate `nrf24`
+component, `nrf24:` YAML section, or `nrf24_id` dependency.
 
-> Only the **MJGJD01YL** (no BLE/WiFi) is supported. The MJGJD02YL will **not** work.
+## Wiring
 
-The low-level SPI radio driver is **not** re-implemented — this component consumes
-[`loucks1/nrf24_espidf`](https://github.com/loucks1/nrf24_espidf) **unmodified** through
-its public C++ API.
+For an ESP32-C3 board that exposes these GPIOs:
 
-## Features
+| nRF24L01+ | ESP32-C3 |
+| --- | --- |
+| VCC | 3.3 V, never 5 V |
+| GND | GND |
+| CE | GPIO4 |
+| CSN | GPIO10 |
+| SCK | GPIO6 |
+| MOSI | GPIO7 |
+| MISO | GPIO5 |
+| IRQ | Not connected |
 
-- `light` entity: on/off, brightness (16 steps), color temperature (mireds 153–370).
-- `event` entity: the 6 remote actions (`press`, `turn_clockwise`,
-  `turn_counterclockwise`, `press_turn_clockwise`, `press_turn_counterclockwise`,
-  `hold`), with native `on_event` plus per-action triggers (`on_press`, …).
-- `button` entities: `pair` and `toggle_internal_state` (resync optimistic on/off).
-- `xiaomi_lightbar.send_command` templatable action for advanced / raw use.
-- Multiple light bars and remotes on a single radio.
-- Optional local forwarding from a remote serial to a different light bar serial.
+Use short wires and place a 10 µF capacitor plus a 100 nF capacitor across VCC/GND
+at the radio. PA/LNA modules may need a separate regulated 3.3 V supply with a
+shared ground. GPIO numbers are not physical header positions.
 
-## Hardware / wiring
+## Configuration
 
-An ESP32 plus an nRF24L01 module. Use a stable 3.3 V supply and a decoupling capacitor
-across the radio's VCC/GND.
-
-| nRF24L01 | ESP32 (example) | Notes |
-| -------- | --------------- | ----- |
-| VCC      | 3V3             | stable 3.3 V + capacitor |
-| GND      | GND             | |
-| CE       | GPIO17          | `ce_pin` on the `nrf24:` component |
-| CSN      | GPIO5           | `cs_pin` on the `nrf24:` component |
-| SCK      | GPIO18          | SPI `clk_pin` |
-| MOSI     | GPIO23          | SPI `mosi_pin` |
-| MISO     | GPIO19          | SPI `miso_pin` |
-
-Pins are examples — set them to match your board.
-
-## Installation
-
-Add both external components (the unmodified nrf24 driver and this one), then configure
-the radio, hub, and entities. See [example.yaml](example.yaml) for a complete config.
+See [example.yaml](example.yaml) for the complete ESP32-C3 configuration. Keep
+Wi-Fi credentials in your own `secrets.yaml`; configure API encryption and OTA
+authentication for your deployment.
 
 ```yaml
 external_components:
   - source:
       type: git
-      url: https://github.com/loucks1/nrf24_espidf
-    components: [nrf24]
-  - source:
-      type: git
-      url: https://github.com/zweckj/esphome-xiaomi-lightbar
+      url: https://github.com/ShellWen/esphome-xiaomi-lightbar-proxy
+      ref: main
     components: [xiaomi_lightbar]
 
 spi:
-  clk_pin: GPIO18
-  mosi_pin: GPIO23
-  miso_pin: GPIO19
-
-# The hub asserts CRC-off / auto-ack-off / payload-size / addresses itself, but the
-# nrf24 watchdog only restores channel/data-rate/PA after a chip reset, so set those
-# here to match the lightbar profile.
-nrf24:
-  id: radio
-  cs_pin: GPIO5
-  ce_pin: GPIO17
-  channel: 68
-  rf_data_rate: 2MBPS
-  pa_level: MAX
+  clk_pin: GPIO6
+  mosi_pin: GPIO7
+  miso_pin: GPIO5
 
 xiaomi_lightbar:
   id: lightbar_hub
-  nrf24_id: radio
-```
+  cs_pin: GPIO10
+  ce_pin: GPIO4
+  data_rate: 1MHz
+  pa_level: LOW
 
-> The ESP-IDF framework is recommended (the nrf24 component targets ESP-IDF).
-
-## Configuration reference
-
-### `xiaomi_lightbar:` (hub)
-
-| Option        | Default | Description |
-| ------------- | ------- | ----------- |
-| `nrf24_id`    | —       | **Required.** ID of the `nrf24:` component. |
-| `channel`     | `68`    | RF channel the hub asserts (match the `nrf24:` channel). |
-| `tx_repeats`  | `20`    | Times each frame is re-sent per command (matches upstream). |
-| `tx_interval` | `10ms`  | Spacing between frame repeats (drained non-blocking from `loop()`). |
-
-### `light:`
-
-```yaml
 light:
   - platform: xiaomi_lightbar
     name: "Monitor Light Bar"
     xiaomi_lightbar_id: lightbar_hub
-    serial: 0xABCDEF        # 24-bit light bar serial
-```
+    serial: 0xABCDEF
 
-Optimistic: the bar reports no state, so on/off is assumed. Brightness maps to 16
-steps; color temperature maps to 153–370 mireds. If the bar gets out of sync (e.g. it
-was toggled with the physical remote), use the `toggle_internal_state` button.
-
-### `event:`
-
-```yaml
 event:
   - platform: xiaomi_lightbar
     name: "Light Bar Remote"
     xiaomi_lightbar_id: lightbar_hub
-    serial: 0x123456        # 24-bit remote serial
-    # forward_to: 0xABCDEF  # optional: relay commands using the light bar serial
-    on_press:
-      then:
-        - logger.log: "pressed"
-    # on_turn_clockwise / on_turn_counterclockwise /
-    # on_press_turn_clockwise / on_press_turn_counterclockwise / on_hold
-```
+    serial: 0x123456
+    forward_to: 0xABCDEF
 
-Event types: `press`, `turn_clockwise`, `turn_counterclockwise`,
-`press_turn_clockwise`, `press_turn_counterclockwise`, `hold`. The native `on_event`
-trigger (with `event_type`) is also available.
-
-#### Local remote forwarding
-
-Set `forward_to` to a 24-bit serial different from the remote's `serial`, then
-pair the light bar to that target serial using the `pair` button described below.
-Use the same target serial for the `light:` and `pair` button configurations.
-The bar should be paired to the target, not to the original remote:
-
-```text
-original remote (0x123456) → ESPHome → light bar (0xABCDEF)
-```
-
-This keeps the stock knob while putting ESPHome in the middle, extending the
-[decoupled setup in lightbar2mqtt](https://github.com/ebinf/lightbar2mqtt#3-pairing-light-bar-and-esp32-optional).
-After CRC validation and deduplication, the received command and options bytes
-are passed unchanged to the existing transmit path. Rotary step/speed information
-is preserved; the target frame gets its own sequence number and CRC. Normal event
-and per-action triggers still fire. Without `forward_to`, behavior is unchanged.
-Keep target serials separate from all configured remote source serials to avoid
-relay chains or cycles between controllers. Avoid automations that send the same
-command again, since forwarding already sends it locally.
-
-Forwarding does not depend on Wi-Fi or Home Assistant, but the ESP32 must stay
-running. ESPHome's Wi-Fi/API `reboot_timeout` settings can restart a device during
-a prolonged outage; set them to `0s` when uninterrupted offline control is needed.
-This only relays commands: it does **not** update the light entity's optimistic
-on/off, brightness, or color-temperature state, and the bar sends no feedback.
-The radio also cannot receive while transmitting a burst, so preserving the
-options byte is not a guarantee that every fast-turn packet will be received.
-
-**Hold is forwarded too.** The remote's `hold` action is `RESET` (`0x06`), also
-used by the `pair` button. It is not filtered: within the bar's pairing window
-after power-on, a forwarded hold can pair it to the target serial. Outside that
-window, the original reverse-engineering project describes RESET as restoring
-medium brightness and warm color. Hardware verification of pairing, hold, fast
-rotation, and offline operation is still needed; these have not been tested on
-hardware for this feature.
-
-### `button:`
-
-```yaml
 button:
   - platform: xiaomi_lightbar
     name: "Light Bar Pair"
     xiaomi_lightbar_id: lightbar_hub
     serial: 0xABCDEF
-    type: pair                    # sends RESET; use within 10s of power-cycling the bar
-  - platform: xiaomi_lightbar
-    name: "Light Bar Resync State"
-    xiaomi_lightbar_id: lightbar_hub
-    serial: 0xABCDEF
-    type: toggle_internal_state   # flips optimistic on/off, no RF sent
+    type: pair
 ```
 
-### `xiaomi_lightbar.send_command` action
+`serial` and `forward_to` are 24-bit values. Press/turn an unconfigured remote and
+look for `Action from unknown serial 0x......` in the logs to discover its serial.
+Choose a different target serial and use it consistently for `forward_to`, the
+light, and the pairing button. Power-cycle the lamp and press the pairing button
+within its 10-second pairing window. The lamp must be paired to the proxy's
+target serial, not directly to the original remote.
 
-Templatable low-level action (advanced use / sniffing). `command`/`options` are raw
-protocol bytes (`ON_OFF 0x01`, `COOLER 0x02`, `WARMER 0x03`, `BRIGHTER 0x04`,
-`DIMMER 0x05`, `RESET 0x06`).
+Forwarding runs on the ESP32 without a Home Assistant round trip. It includes
+all command/options bytes, including hold/RESET, after CRC validation and
+per-serial sequence deduplication. Omit `forward_to` for receive-only remote
+events. The six event types are `press`, `turn_clockwise`, `turn_counterclockwise`,
+`press_turn_clockwise`, `press_turn_counterclockwise`, and `hold`; corresponding
+`on_<event>` triggers remain available.
 
-```yaml
-- xiaomi_lightbar.send_command:
-    id: lightbar_hub
-    serial: 0xABCDEF
-    command: 0x06
-    options: 0x00
+The `light` supports on/off, 16 brightness steps, and color temperature. State is
+optimistic: forwarded remote commands do not update the light entity's assumed
+state. A button with `type: toggle_internal_state` changes the assumed on/off
+state without RF transmission. `xiaomi_lightbar.send_command` still accepts
+`id`, `serial`, `command`, and optional `options` for raw commands.
+
+### Migrating from the two-component setup
+
+1. Replace both external sources with the single source above.
+2. Delete the `nrf24:` section and `xiaomi_lightbar.nrf24_id`.
+3. Move `cs_pin`, `ce_pin`, `data_rate`, and `pa_level` into `xiaomi_lightbar`.
+4. Remove `rf_data_rate` and `high_frequency_polling`: their behavior is built in.
+5. Keep your SPI pins, entity IDs, serials, forwarding target, Wi-Fi, API, and OTA
+   settings, then rebuild and flash the firmware.
+
+### Radio behavior and tuning
+
+The protocol is fixed to 2 Mbps, 17-byte payloads, 5-byte addresses, hardware CRC
+and auto-ACK disabled, and NO_ACK transmission. Software CRC remains mandatory.
+SPI uses mode 0/MSB first. High-frequency polling is active whenever the radio is
+ready, with at most three received packets processed per loop. This increases
+CPU activity and power consumption. Missing/reset radios are checked once per
+second, and recovery restores the complete lightbar profile.
+
+Reception resumes after **every transmitted packet**, including failed or timed
+out transmissions. TX cleanup does not flush pending RX packets. The radio is
+still half-duplex: packets can still be missed during the actual transmission,
+RF interference, or other components blocking the ESPHome loop. NO_ACK success
+means local TX completion, not confirmation from the lamp.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `ce_pin`, `cs_pin` | Required | Radio GPIO connections |
+| `spi_id` | Auto-selected | ESPHome SPI bus, with MOSI and MISO required |
+| `data_rate` | `1MHz` | SPI clock, not the fixed 2 Mbps RF rate |
+| `pa_level` | `LOW` | `MIN`, `LOW`, `HIGH`, or `MAX` |
+| `channel` | `68` | RF channel, 0–125; must match the lamp/remote |
+| `tx_repeats` | `20` | Copies per command, 1–255 |
+| `tx_interval` | `10ms` | Positive interval between TX attempts |
+
+Keep the SPI clock within the nRF24L01+'s 10 MHz limit. Higher RF power is not
+necessarily better at short range. At the default repeat count/interval, a
+command occupies about 200 ms of the TX queue; rapid actions can queue up even
+though reception continues between repeats. Tune repeats/interval only after
+checking actual delivery on your hardware.
+
+## Verification
+
+```sh
+python3 tests/radio_smoke.py
+esphome compile example.yaml
 ```
 
-## Finding a remote's serial
+The standalone check compiles and runs the actual hub and integrated driver
+against a register/FIFO/CE/SPI boundary model with ASan/UBSan. It covers forwarding
+during pending bursts, frame integrity, duplicate/invalid packets, sequence
+rollover, TX status/failure/timeout handling, preservation of pending RX, and
+radio recovery. It requires Python 3 and a C++17 compiler with sanitizer support.
 
-Flash the config, then press/turn the remote and watch the logs (DEBUG/INFO):
+This is not an RF delivery test. Physical pairing, reception loss rate, fast-turn
+feel, and Wi-Fi/HA outage behavior must be checked on a real lamp and remote.
 
-```
-[I][xiaomi_lightbar]: Action from unknown serial 0x7B7E12 (command 0x01). Add an 'event' with this serial to handle it.
-```
+The complete ESP32-C3 example has also been compiled with ESPHome 2026.9.1 and
+ESP-IDF 5.5.5, producing factory and OTA firmware images.
 
-Copy that serial into an `event:` (and/or `light:`) block.
+## Original history and licenses
 
-## Pairing
+Both Git histories are retained through a two-parent merge, without squashing,
+rebasing, or changing the original commit IDs:
 
-To decouple the bar from its original remote (or use a different serial), power-cycle
-the light bar and, within 10 seconds, press the `pair` button (or send
-`xiaomi_lightbar.send_command` with `command: 0x06`). The bar blinks to confirm.
+- [zweckj/esphome-xiaomi-lightbar](https://github.com/zweckj/esphome-xiaomi-lightbar),
+  including the forwarding branch at
+  [`b7022a8`](https://github.com/ShellWen/esphome-xiaomi-lightbar/commit/b7022a8146853449313d4d1045d4d66f034a9ed7).
+- [loucks1/nrf24_espidf](https://github.com/loucks1/nrf24_espidf), including the
+  driver corrections at
+  [`1dfac52`](https://github.com/ShellWen/nrf24_espidf/commit/1dfac52765a2ba1603ef98f7fdd71172bfa1a25e).
 
-## Migrating from lightbar2mqtt
+The original lightbar [LICENSE](LICENSE) is preserved unchanged, including its
+lightbar2mqtt attribution. The nRF24 repository has no standalone `LICENSE` file
+in the imported history. Its original MIT copyright/permission notice for
+Stefan Engelke and Greg Copeland is preserved verbatim in
+[`nRF24L01.h`](components/xiaomi_lightbar/nRF24L01.h). This does not assert an
+additional license grant for upstream files without a license notice.
 
-| lightbar2mqtt MQTT topic / payload | ESPHome equivalent |
-| ---------------------------------- | ------------------ |
-| `.../<serial>/command` `{state,brightness,color_temp}` | `light:` entity (state, brightness 0–15 ≙ 0–100%, mireds 153–370) |
-| `.../<serial>/state` (`press`, `turn_clockwise`, …) | `event:` entity (`on_event` / `on_press` / …) |
-| `.../<serial>/pair` | `button:` `type: pair` |
-| `.../<serial>/toggle_internal` | `button:` `type: toggle_internal_state` |
-| MQTT availability topic | ESPHome API/`status` (built in) |
-| Home Assistant MQTT discovery | ESPHome native API discovery |
-
-## How it works / deviations from upstream
-
-- **nrf24 stays unmodified.** The whole lightbar profile is achieved via the public
-  API: before every `start_listening()` the hub calls `open_reading_pipe(0, …)` (the
-  driver's `stop_listening()` closes all pipes and `open_writing_pipe()` clobbers the
-  pipe-0 RX address), and it asserts CRC-off/auto-ack-off/payload-17/addresses itself.
-- **Non-blocking TX.** Upstream sends `20 × (write + delay(10))` ≈ 200 ms inline, which
-  would trip ESPHome's loop watchdog. Here each command is queued and drained one frame
-  per `tx_interval` from `loop()` (NO_ACK writes return in well under 1 ms).
-- **Radio-profile self-heal.** The nrf24 15 s watchdog only restores channel/data-rate/
-  PA. The hub detects a chip reset cheaply (CRC re-enabled) and re-asserts the full
-  lightbar profile, so RX/TX recover automatically.
-- **Deduplication fix.** Upstream compared the packet sequence number against the wrong
-  struct field; the intent (reject a repeat of the last sequence number per serial) is
-  ported correctly here.
-
-## Acknowledgements
-
-- [ebinf/lightbar2mqtt](https://github.com/ebinf/lightbar2mqtt) — the project this ports.
-- [lamperez/xiaomi-lightbar-nrf24](https://github.com/lamperez/xiaomi-lightbar-nrf24) —
-  the original protocol reverse engineering.
-- [benallen-dev/xiaomi-lightbar](https://github.com/benallen-dev/xiaomi-lightbar).
-- [loucks1/nrf24_espidf](https://github.com/loucks1/nrf24_espidf) — the ESPHome nRF24 driver.
-
-## License
-
-MIT — see [LICENSE](LICENSE).
+The old general-purpose driver, examples, and planning files remain available
+in Git history; only the dedicated lightbar component is exposed in the current
+tree. Protocol credits remain with
+[lightbar2mqtt](https://github.com/ebinf/lightbar2mqtt),
+[lamperez](https://github.com/lamperez/xiaomi-lightbar-nrf24), and
+[Ben Allen](https://github.com/benallen-dev/xiaomi-lightbar).
