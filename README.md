@@ -42,3 +42,24 @@ nrf24:
   channel: 76             # Optional: 0-125
   rf_data_rate: 1MBPS    # Optional: 250KBPS, 1MBPS, 2MBPS
   pa_level: MAX          # Optional: MIN, LOW, HIGH, MAX
+  high_frequency_polling: false
+```
+
+## Receive polling and transmission
+
+The component reads up to three queued packets per loop. Set
+`high_frequency_polling: true` to request ESPHome's high-frequency loop mode while
+the radio is initialized, listening, and has data callbacks. This option defaults
+to `false`; enabling it increases CPU activity and power consumption. The request
+is released on the next component loop when callback-based reception is inactive,
+including after `power_down()`, or the option is disabled. Batches are bounded by
+the hardware FIFO depth so continuous traffic cannot monopolize a loop iteration.
+
+`write()` waits for the TX-complete or maximum-retry interrupt, with a 95 ms
+timeout. Failure lowers CE and flushes the unsent TX payload without discarding
+queued RX packets. Multicast writes enable `EN_DYN_ACK` before using the NO_ACK
+payload command. Successful NO_ACK transmission does not confirm reception by
+the destination.
+
+Existing configurations remain valid. Applications must still return the
+half-duplex radio to listening mode between transmissions when they need RX.
